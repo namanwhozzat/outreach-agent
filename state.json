@@ -25,6 +25,30 @@
    "repo": "dotnetfactory/fluid-calendar",
    "status": "draft_only",
    "title": "Feature Request: External Task Provider Integrations"
+  },
+  {
+   "comment": "_Disclosure: I work at viaSocket._\n\nThe notification work you're doing looks great! If you want to handle more than the notification-specific providers (SMTP, ntfy, webhooks), viaSocket Embed might help with the broader integration catalog\u2014it gives you 2,300+ app integrations (Gmail, Slack, HubSpot, Google Sheets, etc.) so users can build automations between PeaNUT and other apps without you maintaining each one. We'd contribute an optional, off-by-default PR: backend route to sign a token, one UI entry point, docs\u2014nothing changes unless users enable it with env vars. Would you accept a PR like that?",
+   "comment_url": null,
+   "dry_run": true,
+   "issue_number": 136,
+   "issue_url": "https://github.com/Brandawg93/PeaNUT/issues/136",
+   "posted_at": "2026-09-24T06:20:03.955813+00:00",
+   "posted_at_gh": null,
+   "repo": "Brandawg93/PeaNUT",
+   "status": "draft_only",
+   "title": "[Feature Request]: notification integrations"
+  },
+  {
+   "comment": "_Disclosure: I work at viaSocket._\n\nIf you're considering external task provider integrations, viaSocket Embed might help. It's a hosted widget that gives your users access to 2,300+ app integrations (Gmail, Slack, HubSpot, Google Sheets, and many task/project tools) directly in your UI. Users connect their accounts and build automations between apps without leaving fluid-calendar. We could submit an optional, off-by-default PR (env-gated, one backend route to sign tokens, one UI entry point, docs) so maintainers control whether to enable it. Would you be open to that approach for this feature?",
+   "comment_url": null,
+   "dry_run": true,
+   "issue_number": 19,
+   "issue_url": "https://github.com/dotnetfactory/fluid-calendar/issues/19",
+   "posted_at": "2026-09-24T06:20:29.270275+00:00",
+   "posted_at_gh": null,
+   "repo": "dotnetfactory/fluid-calendar",
+   "status": "draft_only",
+   "title": "Feature Request: External Task Provider Integrations"
   }
  ],
  "skipped_issues": {

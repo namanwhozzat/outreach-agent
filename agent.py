@@ -52,6 +52,11 @@ COMPETITOR_REPOS = {"n8n-io/n8n", "activepieces/activepieces", "windmill-labs/wi
                     "huginn/huginn", "automatisch/automatisch", "PipedreamHQ/pipedream",
                     "ComposioHQ/composio", "NangoHQ/nango", "viasocket/viasocket"}
 MAINTAINER = {"OWNER", "MEMBER", "COLLABORATOR"}
+BAD_TOPICS = {"homelab", "home-lab", "home-automation", "homeassistant", "home-assistant", "raspberry-pi",
+              "offline-first", "local-first", "nut", "ups", "desktop-app", "cli", "vscode-extension"}
+# drafts containing any of these are rejected (hype, vague claims, promises we can't back)
+BANNED = ["!", "etc.", "many ", "and more", "looks great", "sync", "real-time", "realtime", "seamless",
+          "easily", "powerful", "free", "self-host", "leverage"]
 
 EMBED_FACTS = """
 Facts about viaSocket Embed (use ONLY these; do not invent pricing, free tiers, self-hosting, or numbers):
@@ -165,6 +170,7 @@ def repo_ok(r):
     pushed = dt.datetime.fromisoformat(r["pushed_at"].replace("Z", "+00:00"))
     if now() - pushed > dt.timedelta(days=REPO_ACTIVE_DAYS): return False, "inactive"
     if not r.get("has_issues", True): return False, "issues off"
+    if set(t.lower() for t in r.get("topics", [])) & BAD_TOPICS: return False, "homelab/offline tool"
     return True, ""
 
 def find_candidates(s, limit=25):
@@ -206,7 +212,7 @@ Rules:
   AND the repo is an end-user product (SaaS app, CRM, helpdesk, PM tool, AI app), not a library.
 - post=false if: a maintainer already rejected integrations, a maintainer is already building / has a PR
   for the ask, the issue is a bug report, the project already shipped what is asked, the project is a
-  self-hosted / homelab / offline-first tool (viaSocket is cloud-only), or the thread says no vendors/ads.
+  homelab / hardware / offline-first / desktop / CLI tool (viaSocket is cloud-only; self-hostable web apps are fine), or the thread says no vendors/ads.
 - Comment: plain English, under 80 words, one short paragraph plus the question. No hype, no emojis, no links.
   Reference the specific ask in this issue. Offer an OPTIONAL, off-by-default PR. End by ASKING the
   maintainers if they would accept it. Never claim anything outside the facts above.
@@ -234,8 +240,12 @@ def draft(c, s):
     if not isinstance(d, dict) or "post" not in d:
         return {"post": False, "reason": "model output unreadable", "comment": ""}
     d["comment"] = (d.get("comment") or "").strip()
-    if d["post"] and (len(d["comment"].split()) > 100 or not d["comment"].rstrip().endswith("?") and "?" not in d["comment"]):
+    if d["post"] and (len(d["comment"].split()) > 90 or not d["comment"].rstrip().endswith("?") and "?" not in d["comment"]):
         return {"post": False, "reason": "draft failed checks (too long / no question)", "comment": d["comment"]}
+    low = d["comment"].lower()
+    hit = [b for b in BANNED if b in low]
+    if d["post"] and hit:
+        return {"post": False, "reason": f"draft failed checks (banned words: {', '.join(hit)})", "comment": d["comment"]}
     return d
 
 # ---------------- 4. post ----------------

@@ -34,15 +34,26 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 REPORT_FILE = os.environ.get("REPORT_FILE", "report.md")
 DISCLOSURE = "_Disclosure: I work at viaSocket._"
 
-SEARCH_QUERIES = [
-    'is:issue is:open zapier in:title',
-    'is:issue is:open n8n in:title',
-    'is:issue is:open "make.com" in:title',
-    'is:issue is:open integromat in:title',
-    'is:issue is:open "automation" "integration" in:title',
-    'is:issue is:open "integrations" "feature request" in:title',
-    'is:issue is:open "workflow automation" in:title',
-]
+# Step A: build a pool of real end-user products by GitHub topic (refreshed weekly)
+TARGET_TOPICS = ["crm", "helpdesk", "customer-support", "project-management", "task-management", "kanban",
+                 "forms", "form-builder", "survey", "email-marketing", "newsletter", "marketing-automation",
+                 "invoicing", "accounting", "erp", "hrms", "ats", "scheduling", "booking", "appointment",
+                 "live-chat", "chatbot", "ai-assistant", "ai-agents", "knowledge-base", "wiki", "cms",
+                 "e-commerce", "lms", "saas", "no-code", "low-code", "internal-tools"]
+# Step B: in each pooled repo, look for issues whose TITLE matches any group below.
+# GitHub allows max 5 OR per search and 256 characters, so terms are split into groups of 6.
+# Edit freely: add groups for new use cases (keep each group to 6 terms max).
+SEARCH_GROUPS = {
+    "automation tools": 'zapier OR n8n OR "make.com" OR pipedream OR integromat OR ifttt',
+    "general":          'integration OR integrations OR automation OR automations OR webhook OR webhooks',
+    "use-case verbs":   '"connect to" OR "sync with" OR "send to" OR "push to" OR "export to" OR notify',
+    "apps 1":           'slack OR hubspot OR salesforce OR "google sheets" OR mailchimp OR "google calendar"',
+    "apps 2":           'notion OR airtable OR whatsapp OR "microsoft teams" OR discord OR telegram',
+    "extensibility":    '"third-party" OR "third party" OR plugins OR marketplace OR "api access" OR connectors',
+}
+assert all(g.count(" OR ") <= 5 for g in SEARCH_GROUPS.values())
+REPOS_CHECKED_PER_RUN = 20            # x 6 groups = 120 searches, about 4.5 min at GitHub's 30/min limit
+RECHECK_REPO_DAYS = 21
 # repos that are libraries/frameworks/lists, not products end users run
 EXCLUDE = re.compile(r"\b(framework|library|sdk|toolkit|awesome|curated|list of|tutorial|course|"
                      r"examples?|boilerplate|template|starter|cookbook|wrapper|bindings|plugin for|"
@@ -65,7 +76,9 @@ Facts about viaSocket Embed (use ONLY these; do not invent pricing, free tiers, 
 - End users connect apps and build automations without leaving the host product.
 - Setup for the host app: viaSocket org_id, project_id, access_key; the host backend signs a JWT (HS256)
   per user and passes it as embedToken to the viaSocket embed script.
-- viaSocket is a hosted (cloud) service. It is NOT self-hosted. If the issue asks for self-hosted, say so honestly.
+- viaSocket itself is a hosted (cloud) service. Self-hostable web apps CAN still use Embed (the app loads the viaSocket
+  script over the internet). Only treat it as a bad fit if the issue says everything must stay offline / on-premise /
+  without third-party cloud services.
 - The PR we would offer: optional, off by default, enabled by env vars; one backend route to sign the token;
   one UI entry point; docs. Nothing changes for users who don't enable it.
 """
@@ -128,6 +141,8 @@ def load_state():
     return {"me": None, "contacted_repos": {}, "skipped_issues": {}, "posts": []}
 
 def save_state(s):
+    if DRY_RUN:   # test runs never change memory, so the live run starts clean
+        return
     json.dump(s, open(STATE_FILE, "w"), indent=1, sort_keys=True)
 
 def now(): return dt.datetime.now(dt.timezone.utc)
@@ -173,33 +188,60 @@ def repo_ok(r):
     if set(t.lower() for t in r.get("topics", [])) & BAD_TOPICS: return False, "homelab/offline tool"
     return True, ""
 
+def refresh_pool(s):
+    pool = s.setdefault("repo_pool", {"built": None, "repos": {}})
+    if pool["built"] and now() - dt.datetime.fromisoformat(pool["built"]) < dt.timedelta(days=7):
+        return
+    pushed = (now() - dt.timedelta(days=REPO_ACTIVE_DAYS)).date().isoformat()
+    for t in TARGET_TOPICS:
+        q = f"topic:{t} stars:{MIN_STARS}..{MAX_STARS} pushed:>{pushed} archived:false fork:false"
+        res = gh("/search/repositories", {"q": q, "sort": "stars", "order": "desc", "per_page": 100}, search=True) or {}
+        for r in res.get("items", []):
+            ok, _ = repo_ok(r)
+            if ok:
+                pool["repos"][r["full_name"]] = {
+                    "stars": r["stargazers_count"], "language": r.get("language"),
+                    "license": (r.get("license") or {}).get("spdx_id"),
+                    "description": r.get("description") or "", "topics": r.get("topics", [])}
+    pool["built"] = now().isoformat()
+    log(f"repo pool: {len(pool['repos'])} products")
+
 def find_candidates(s, limit=25):
-    seen, out, repo_cache = set(), [], {}
+    refresh_pool(s)
+    checked = s.setdefault("repo_checked", {})
+    cut = now() - dt.timedelta(days=RECHECK_REPO_DAYS)
+    pool = s["repo_pool"]["repos"]
+    todo = [r for r in sorted(pool, key=lambda k: pool[k]["stars"], reverse=True)
+            if r not in s["contacted_repos"] and (r not in checked or dt.datetime.fromisoformat(checked[r]) < cut)]
+    # leftovers from last run (found but not reached because of the daily cap) go first
+    out = [c for c in s.pop("queue", []) if c["repo"] not in s["contacted_repos"]
+           and f"{c['repo']}#{c['issue_number']}" not in s["skipped_issues"]]
     min_created = (now() - dt.timedelta(days=ISSUE_MAX_AGE_DAYS)).date().isoformat()
-    for q in SEARCH_QUERIES:
-        res = gh("/search/issues", {"q": f"{q} created:>{min_created}", "sort": "reactions",
-                                    "order": "desc", "per_page": 50}, search=True) or {}
-        for it in res.get("items", []):
-            if "pull_request" in it or it.get("locked"): continue
-            repo = it["repository_url"].split("/repos/")[1]
+    for repo in todo[:REPOS_CHECKED_PER_RUN]:
+        hits = {}
+        for label, terms in SEARCH_GROUPS.items():
+            q = f"repo:{repo} is:issue is:open {terms} in:title created:>{min_created}"
+            res = gh("/search/issues", {"q": q, "sort": "reactions", "order": "desc", "per_page": 5}, search=True)
+            if res is None:
+                log(f"search rejected by GitHub for group '{label}' - check its syntax")
+                continue
+            for it in res.get("items", []):
+                h = hits.setdefault(it["number"], {**it, "matched": []})
+                h["matched"].append(label)
+        checked[repo] = now().isoformat()
+        r = pool[repo]
+        best = sorted(hits.values(), key=lambda i: (len(i["matched"]), i.get("reactions", {}).get("total_count", 0)), reverse=True)
+        for it in best[:3]:                          # top 3 issues per repo
             key = f"{repo}#{it['number']}"
-            if key in seen or repo in s["contacted_repos"] or key in s["skipped_issues"]: continue
-            seen.add(key)
-            if repo not in repo_cache:
-                repo_cache[repo] = gh(f"/repos/{repo}")
-            ok, why = repo_ok(repo_cache[repo])
-            if not ok:
-                s["skipped_issues"][key] = why; continue
-            r = repo_cache[repo]
+            if "pull_request" in it or it.get("locked") or key in s["skipped_issues"]:
+                continue
             out.append({"repo": repo, "issue_number": it["number"], "issue_url": it["html_url"],
                         "title": it["title"], "body": (it.get("body") or "")[:3000],
                         "reactions": it.get("reactions", {}).get("total_count", 0),
                         "comments": it.get("comments", 0), "created_at": it["created_at"],
-                        "stars": r["stargazers_count"], "language": r.get("language"),
-                        "license": (r.get("license") or {}).get("spdx_id"),
-                        "description": r.get("description") or "", "topics": r.get("topics", [])})
-    # rank: demand first, then repo size
+                        "matched": it["matched"], **r})
     out.sort(key=lambda c: (c["reactions"] * 3 + c["comments"], c["stars"]), reverse=True)
+    log(f"checked {min(len(todo), REPOS_CHECKED_PER_RUN)} repos, {len(out)} candidate issues")
     return out[:limit]
 
 # ---------------- 3. draft ----------------
@@ -208,11 +250,12 @@ You read one GitHub issue and decide whether a comment offering viaSocket Embed 
 useful to that project, then write it.
 {EMBED_FACTS}
 Rules:
-- Only say post=true if the issue asks for automation / integrations with other apps / Zapier / n8n / Make,
+- Only say post=true if the issue asks to connect the product to other apps (e.g. send to Slack, add to
+  HubSpot, export to Google Sheets, notify on WhatsApp), or for automation / integrations / Zapier / n8n / Make,
   AND the repo is an end-user product (SaaS app, CRM, helpdesk, PM tool, AI app), not a library.
 - post=false if: a maintainer already rejected integrations, a maintainer is already building / has a PR
   for the ask, the issue is a bug report, the project already shipped what is asked, the project is a
-  homelab / hardware / offline-first / desktop / CLI tool (viaSocket is cloud-only; self-hostable web apps are fine), or the thread says no vendors/ads.
+  homelab / hardware / offline-first / desktop / CLI tool (self-hostable web apps ARE fine targets), or the thread says no vendors/ads.
 - Comment: plain English, under 80 words, one short paragraph plus the question. No hype, no emojis, no links.
   Reference the specific ask in this issue. Offer an OPTIONAL, off-by-default PR. End by ASKING the
   maintainers if they would accept it. Never claim anything outside the facts above.
@@ -229,8 +272,19 @@ def draft(c, s):
         return {"post": False, "reason": "we already commented", "comment": ""}
     user = (f"Repo: {c['repo']} ({c['stars']} stars, {c['language']}, licence {c['license']})\n"
             f"Repo description: {c['description']}\nTopics: {', '.join(c['topics'])}\n\n"
-            f"Issue #{c['issue_number']}: {c['title']}\nOpened: {c['created_at']}  Reactions: {c['reactions']}\n"
+            f"Issue #{c['issue_number']}: {c['title']}\nMatched keyword groups: {', '.join(c.get('matched', []))}\nOpened: {c['created_at']}  Reactions: {c['reactions']}\n"
             f"Body:\n{c['body']}\n\nExisting comments:\n{convo or '(none)'}")
+    d = ask(user)
+    problem = check(d)
+    if problem:  # one rewrite attempt with the exact problem
+        d = ask(user + f"\n\nYour previous draft was rejected: {problem}. Previous draft:\n{d['comment']}\n"
+                       "Rewrite it to fix exactly that, following every rule.")
+        problem = check(d)
+        if problem:
+            return {"post": False, "reason": f"draft failed checks twice ({problem})", "comment": d.get("comment", "")}
+    return d
+
+def ask(user):
     raw = claude(SYSTEM, user)
     m = re.search(r"\{.*\}", raw, re.S)
     try:
@@ -240,13 +294,17 @@ def draft(c, s):
     if not isinstance(d, dict) or "post" not in d:
         return {"post": False, "reason": "model output unreadable", "comment": ""}
     d["comment"] = (d.get("comment") or "").strip()
-    if d["post"] and (len(d["comment"].split()) > 90 or not d["comment"].rstrip().endswith("?") and "?" not in d["comment"]):
-        return {"post": False, "reason": "draft failed checks (too long / no question)", "comment": d["comment"]}
-    low = d["comment"].lower()
-    hit = [b for b in BANNED if b in low]
-    if d["post"] and hit:
-        return {"post": False, "reason": f"draft failed checks (banned words: {', '.join(hit)})", "comment": d["comment"]}
     return d
+
+def check(d):
+    if not d.get("post"):
+        return None
+    c = d["comment"]
+    if len(c.split()) > 90: return f"too long ({len(c.split())} words, max 90)"
+    if "?" not in c: return "no question to the maintainers"
+    hit = [b for b in BANNED if b in c.lower()]
+    if hit: return "banned words: " + ", ".join(repr(h) for h in hit)
+    return None
 
 # ---------------- 4. post ----------------
 def post_comment(s, c, text):
@@ -293,11 +351,14 @@ def main():
         if not s["me"]: sys.exit("GH_PAT invalid: /user returned nothing")
     log(f"account: {s['me']}  dry_run: {DRY_RUN}  model: {MODEL}")
     updates = check_replies(s)
-    budget = min(MAX_POSTS_PER_RUN, MAX_POSTS_PER_WEEK - posts_last_7d(s))
+    budget = 5 if DRY_RUN else min(MAX_POSTS_PER_RUN, MAX_POSTS_PER_WEEK - posts_last_7d(s))  # test runs show 5 drafts
     new, skipped = [], []
     if budget > 0:
-        for c in find_candidates(s):
-            if len(new) >= budget: break
+        cands = find_candidates(s)
+        for i, c in enumerate(cands):
+            if len(new) >= budget:
+                s["queue"] = cands[i:]   # keep the rest for the next run
+                break
             key = f"{c['repo']}#{c['issue_number']}"
             d = draft(c, s)
             if not d.get("post"):

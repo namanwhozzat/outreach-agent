@@ -132,6 +132,48 @@ def claude(system, user, max_tokens=900):
         raise RuntimeError("Claude API returned nothing")
     return "".join(b.get("text", "") for b in res.get("content", []) if b.get("type") == "text")
 
+# ---------------- viaSocket app catalog ----------------
+CATALOG_URL = os.environ.get("CATALOG_URL") or "https://flow.sokt.io/func/scriVcDYhP1N"
+CORE_APPS = {"gmail", "slack", "hubspot", "google sheets"}
+GENERIC = {"feature", "features", "integration", "integrations", "webhook", "webhooks", "api", "support",
+           "request", "requests", "inbox", "automation", "automations", "notification", "notifications",
+           "sync", "export", "import", "plugin", "plugins", "add", "allow", "enhancement", "bug", "the", "with",
+           "send", "connect", "push", "notify", "create", "enable", "option", "options", "native", "using",
+           "when", "should", "would", "please", "provider", "providers", "channel", "channels", "service",
+           "services", "app", "apps", "tool", "tools", "custom", "external", "third", "party", "data"}
+_catalog = [None]
+
+def catalog():
+    """Set of lowercase app names in viaSocket's catalog, or empty set if it can't be loaded."""
+    if _catalog[0] is not None:
+        return _catalog[0]
+    names = set()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(CATALOG_URL, headers={"User-Agent": "viasocket-outreach-agent"}), timeout=90) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        def walk(x):
+            if isinstance(x, dict):
+                for k, v in x.items():
+                    if k.lower() in ("name", "title", "appname", "app_name", "pluginname", "plugin_name") and isinstance(v, str):
+                        names.add(v.strip().lower())
+                    else:
+                        walk(v)
+            elif isinstance(x, list):
+                for v in x:
+                    if isinstance(v, str): names.add(v.strip().lower())
+                    else: walk(v)
+        walk(data)
+    except Exception as ex:
+        log(f"could not load app catalog ({ex}); only Gmail/Slack/HubSpot/Google Sheets may be named")
+    names = {n for n in names if len(n) >= 3 and not any(t in n for t in ("test", "dummy", "asdf"))}
+    log(f"app catalog: {len(names)} apps")
+    _catalog[0] = names
+    return names
+
+def catalog_apps_in(text):
+    low = text.lower()
+    return sorted(n for n in catalog() if len(n) >= 4 and re.search(r"(?<![a-z0-9])" + re.escape(n) + r"(?![a-z0-9])", low))
+
 # ---------------- state ----------------
 def log(*a): print(*a, file=sys.stderr, flush=True)
 
@@ -259,8 +301,9 @@ Rules:
 - Comment: plain English, under 80 words, one short paragraph plus the question. No hype, no emojis, no links.
   Reference the specific ask in this issue. Offer an OPTIONAL, off-by-default PR. End by ASKING the
   maintainers if they would accept it. Never claim anything outside the facts above.
-- Name NO apps except Gmail, Slack, HubSpot, Google Sheets (the only ones confirmed). Do not say viaSocket
-  supports any app the issue names unless it is one of those four. Do not promise syncs, 2-way sync,
+- Name NO apps except Gmail, Slack, HubSpot, Google Sheets, plus any app listed under "Supported apps named
+  in this issue" in the message. Never say viaSocket supports an app the issue names if it is not in that list.
+- If the app the issue mainly asks for is NOT in the supported list, set post=false. Do not promise syncs, 2-way sync,
   real-time, or specific features; say "automations between apps".
 - Do NOT include a disclosure line; the system adds it.
 Reply with ONLY JSON: {{"post": true|false, "reason": "<one line>", "comment": "<markdown or empty>"}}"""
@@ -274,12 +317,14 @@ def draft(c, s):
             f"Repo description: {c['description']}\nTopics: {', '.join(c['topics'])}\n\n"
             f"Issue #{c['issue_number']}: {c['title']}\nMatched keyword groups: {', '.join(c.get('matched', []))}\nOpened: {c['created_at']}  Reactions: {c['reactions']}\n"
             f"Body:\n{c['body']}\n\nExisting comments:\n{convo or '(none)'}")
+    supported = catalog_apps_in(c["title"] + "\n" + c["body"])
+    user += "\n\nSupported apps named in this issue (from viaSocket's catalog): " + (", ".join(supported) or "none found")
     d = ask(user)
-    problem = check(d)
+    problem = check(d, c, supported)
     if problem:  # one rewrite attempt with the exact problem
         d = ask(user + f"\n\nYour previous draft was rejected: {problem}. Previous draft:\n{d['comment']}\n"
                        "Rewrite it to fix exactly that, following every rule.")
-        problem = check(d)
+        problem = check(d, c, supported)
         if problem:
             return {"post": False, "reason": f"draft failed checks twice ({problem})", "comment": d.get("comment", "")}
     return d
@@ -296,10 +341,19 @@ def ask(user):
     d["comment"] = (d.get("comment") or "").strip()
     return d
 
-def check(d):
+def check(d, cand=None, supported=()):
     if not d.get("post"):
         return None
     c = d["comment"]
+    if cand:  # an app named in the issue title may appear in the comment only if viaSocket supports it
+        ok = set(CORE_APPS) | set(supported) | set(re.split(r"[/_\-]", cand["repo"].lower()))
+        title = re.sub(r"^\s*(\[[^\]]*\]\s*:?\s*|\w+\s*:\s*)", "", cand["title"])   # drop "[feature]:" / "feat:"
+        words = re.findall(r"\b[A-Z][A-Za-z0-9.+]{3,}\b", title)
+        for w in words:
+            lw = w.lower()
+            if lw in GENERIC or lw in ok: continue
+            if re.search(r"(?<![A-Za-z0-9])" + re.escape(w) + r"(?![A-Za-z0-9])", c, re.I):
+                return f"names '{w}', which is not confirmed in viaSocket's app catalog"
     if len(c.split()) > 90: return f"too long ({len(c.split())} words, max 90)"
     if "?" not in c: return "no question to the maintainers"
     hit = [b for b in BANNED if b in c.lower()]
@@ -355,16 +409,20 @@ def main():
     new, skipped = [], []
     if budget > 0:
         cands = find_candidates(s)
+        done_repos = set()
         for i, c in enumerate(cands):
             if len(new) >= budget:
-                s["queue"] = cands[i:]   # keep the rest for the next run
+                s["queue"] = [x for x in cands[i:] if x["repo"] not in done_repos]   # keep the rest for the next run
                 break
+            if c["repo"] in done_repos:
+                continue          # one comment per repo, ever - never two issues of the same repo
             key = f"{c['repo']}#{c['issue_number']}"
             d = draft(c, s)
             if not d.get("post"):
                 s["skipped_issues"][key] = d.get("reason", "skip"); skipped.append((key, d.get("reason")))
                 continue
             new.append(post_comment(s, c, d["comment"]))
+            done_repos.add(c["repo"])
             save_state(s)
             time.sleep(20)  # space posts out
     else:

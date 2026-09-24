@@ -204,11 +204,15 @@ useful to that project, then write it.
 Rules:
 - Only say post=true if the issue asks for automation / integrations with other apps / Zapier / n8n / Make,
   AND the repo is an end-user product (SaaS app, CRM, helpdesk, PM tool, AI app), not a library.
-- post=false if: a maintainer already rejected integrations, the issue is a bug report, the project already
-  shipped what is asked, the ask needs self-hosting only, or the thread says no vendors/ads.
-- Comment: plain English, under 110 words, no hype words, no emojis, no links except none.
+- post=false if: a maintainer already rejected integrations, a maintainer is already building / has a PR
+  for the ask, the issue is a bug report, the project already shipped what is asked, the project is a
+  self-hosted / homelab / offline-first tool (viaSocket is cloud-only), or the thread says no vendors/ads.
+- Comment: plain English, under 80 words, one short paragraph plus the question. No hype, no emojis, no links.
   Reference the specific ask in this issue. Offer an OPTIONAL, off-by-default PR. End by ASKING the
   maintainers if they would accept it. Never claim anything outside the facts above.
+- Name NO apps except Gmail, Slack, HubSpot, Google Sheets (the only ones confirmed). Do not say viaSocket
+  supports any app the issue names unless it is one of those four. Do not promise syncs, 2-way sync,
+  real-time, or specific features; say "automations between apps".
 - Do NOT include a disclosure line; the system adds it.
 Reply with ONLY JSON: {{"post": true|false, "reason": "<one line>", "comment": "<markdown or empty>"}}"""
 
@@ -230,7 +234,7 @@ def draft(c, s):
     if not isinstance(d, dict) or "post" not in d:
         return {"post": False, "reason": "model output unreadable", "comment": ""}
     d["comment"] = (d.get("comment") or "").strip()
-    if d["post"] and (len(d["comment"].split()) > 140 or not d["comment"].rstrip().endswith("?") and "?" not in d["comment"]):
+    if d["post"] and (len(d["comment"].split()) > 100 or not d["comment"].rstrip().endswith("?") and "?" not in d["comment"]):
         return {"post": False, "reason": "draft failed checks (too long / no question)", "comment": d["comment"]}
     return d
 

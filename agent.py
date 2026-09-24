@@ -64,7 +64,11 @@ COMPETITOR_REPOS = {"n8n-io/n8n", "activepieces/activepieces", "windmill-labs/wi
                     "ComposioHQ/composio", "NangoHQ/nango", "viasocket/viasocket"}
 MAINTAINER = {"OWNER", "MEMBER", "COLLABORATOR"}
 BAD_TOPICS = {"homelab", "home-lab", "home-automation", "homeassistant", "home-assistant", "raspberry-pi",
-              "offline-first", "local-first", "nut", "ups", "desktop-app", "cli", "vscode-extension"}
+              "offline-first", "local-first", "nut", "ups", "desktop-app", "cli", "vscode-extension",
+              # frameworks / libraries for developers, not products end users run
+              "framework", "library", "sdk", "agent-framework", "llm-framework", "multi-agent-framework",
+              "python-library", "npm-package", "langchain", "langgraph", "api-wrapper", "boilerplate", "template",
+              "mcp-server", "developer-tools", "devtools", "awesome", "awesome-list"}
 # drafts containing any of these are rejected (hype, vague claims, promises we can't back)
 BANNED = ["!", "etc.", "many ", "and more", "looks great", "sync", "real-time", "realtime", "seamless",
           "easily", "powerful", "free", "self-host", "leverage"]
@@ -142,6 +146,7 @@ GENERIC = {"feature", "features", "integration", "integrations", "webhook", "web
            "when", "should", "would", "please", "provider", "providers", "channel", "channels", "service",
            "services", "app", "apps", "tool", "tools", "custom", "external", "third", "party", "data"}
 _catalog = [None]
+CHECKED_THIS_RUN = []
 
 def catalog():
     """Set of lowercase app names in viaSocket's catalog, or empty set if it can't be loaded."""
@@ -253,13 +258,21 @@ def find_candidates(s, limit=25):
     checked = s.setdefault("repo_checked", {})
     cut = now() - dt.timedelta(days=RECHECK_REPO_DAYS)
     pool = s["repo_pool"]["repos"]
-    todo = [r for r in sorted(pool, key=lambda k: pool[k]["stars"], reverse=True)
-            if r not in s["contacted_repos"] and (r not in checked or dt.datetime.fromisoformat(checked[r]) < cut)]
+    # Sweet spot first: 1k-20k stars (big enough to matter, small enough to answer), then the rest.
+    # Shuffled inside each band so every run (including test runs) looks at different products.
+    import random
+    eligible = [r for r in pool if r not in s["contacted_repos"]
+                and (r not in checked or dt.datetime.fromisoformat(checked[r]) < cut)
+                and not (set(t.lower() for t in pool[r].get("topics", [])) & BAD_TOPICS)]
+    sweet = [r for r in eligible if 1000 <= pool[r]["stars"] <= 20000]
+    rest = [r for r in eligible if r not in sweet]
+    random.shuffle(sweet); random.shuffle(rest)
+    todo = sweet + rest
     # leftovers from last run (found but not reached because of the daily cap) go first
     out = [c for c in s.pop("queue", []) if c["repo"] not in s["contacted_repos"]
            and f"{c['repo']}#{c['issue_number']}" not in s["skipped_issues"]]
     min_created = (now() - dt.timedelta(days=ISSUE_MAX_AGE_DAYS)).date().isoformat()
-    for repo in todo[:REPOS_CHECKED_PER_RUN]:
+    for repo in todo[:(30 if DRY_RUN else REPOS_CHECKED_PER_RUN)]:
         hits = {}
         for label, terms in SEARCH_GROUPS.items():
             q = f"repo:{repo} is:issue is:open {terms} in:title created:>{min_created}"
@@ -271,6 +284,7 @@ def find_candidates(s, limit=25):
                 h = hits.setdefault(it["number"], {**it, "matched": []})
                 h["matched"].append(label)
         checked[repo] = now().isoformat()
+        CHECKED_THIS_RUN.append(repo)
         r = pool[repo]
         best = sorted(hits.values(), key=lambda i: (len(i["matched"]), i.get("reactions", {}).get("total_count", 0)), reverse=True)
         for it in best[:3]:                          # top 3 issues per repo
@@ -283,7 +297,7 @@ def find_candidates(s, limit=25):
                         "comments": it.get("comments", 0), "created_at": it["created_at"],
                         "matched": it["matched"], **r})
     out.sort(key=lambda c: (c["reactions"] * 3 + c["comments"], c["stars"]), reverse=True)
-    log(f"checked {min(len(todo), REPOS_CHECKED_PER_RUN)} repos, {len(out)} candidate issues")
+    log(f"pool {len(pool)} products, {len(eligible)} eligible; checked {min(len(todo), 30 if DRY_RUN else REPOS_CHECKED_PER_RUN)} repos, {len(out)} candidate issues")
     return out[:limit]
 
 # ---------------- 3. draft ----------------
@@ -391,6 +405,8 @@ def report(s, updates, new, skipped):
         L += [f"- {p['repo']} — [{p['title']}]({p['issue_url']})" + (f" → [comment]({p['comment_url']})" if p.get("comment_url") else ""),
               "", "  > " + p["comment"].replace("\n", "\n  > "), ""]
     if not new: L.append("- none")
+    L += ["", f"## Products checked this run ({len(CHECKED_THIS_RUN)})", ", ".join(CHECKED_THIS_RUN) or "none"]
+    L += ["", f"App catalog loaded: {len(_catalog[0] or [])} apps" + ("" if _catalog[0] else " — NOT loaded, only Gmail/Slack/HubSpot/Google Sheets allowed")]
     L += ["", "## Skipped by Claude"] + [f"- {k}: {v}" for k, v in skipped] + ([] if skipped else ["- none"])
     counts = {}
     for p in s["posts"]: counts[p["status"]] = counts.get(p["status"], 0) + 1
@@ -404,6 +420,7 @@ def main():
         s["me"] = (gh("/user") or {}).get("login")
         if not s["me"]: sys.exit("GH_PAT invalid: /user returned nothing")
     log(f"account: {s['me']}  dry_run: {DRY_RUN}  model: {MODEL}")
+    catalog()                       # load app list up front so the report can show whether it worked
     updates = check_replies(s)
     budget = 5 if DRY_RUN else min(MAX_POSTS_PER_RUN, MAX_POSTS_PER_WEEK - posts_last_7d(s))  # test runs show 5 drafts
     new, skipped = [], []

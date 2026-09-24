@@ -1,0 +1,50 @@
+name: viaSocket outreach agent
+
+on:
+  schedule:
+    - cron: "30 5 * * 1-5"   # Mon–Fri 05:30 UTC = 11:00 IST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Draft only, post nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency: outreach
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run agent
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          NOTIFY_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run && 'true' || 'false') || (vars.LIVE == 'true' && 'false' || 'true') }}
+        run: python agent.py
+
+      - name: Show report
+        if: always()
+        run: cat report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Save state
+        if: always()
+        run: |
+          git config user.name "outreach-agent"
+          git config user.email "outreach-agent@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || git commit -m "outreach: update state [skip ci]"
+          git push
